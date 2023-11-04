@@ -46,6 +46,7 @@ python vision.py
 - `v`: Set camera resolution to 1280x960 and 22 FPS.
 - `0-9`: Select different processing pipelines. `0` and any unused numbers currently results in no processing
 - `Spacebar`: Toggle between camera input and static image.
+- `Enter`: Dynamically reloads all preexisting pipelines to allow for code changes without restarting.
 
 ### Note
 
@@ -55,9 +56,41 @@ python vision.py
 
 To extend the application with new pipelines:
 
-1. Add a new Python script in the `runPipeline` directory.
+1. Add a new Python script in the `pipelines` directory.
 2. Define a `runPipeline` function within the script with the appropriate image processing code.
-3. Import the script and add a new `elif` condition in the `runPipeline.runPipeline` function to include your new pipeline.
+3. Import the script and add a new `elif` condition in the `pipelineManager.manage` function to include your new pipeline.
+4. Add a tuple to the `modules_to_reload` list in `pipelineManager.reloadPipelines` that contains the module object and it's string name.
+
+## Dynamic Reload Feature
+
+The dynamic reload feature in our application allows you to update the image processing pipelines without restarting the entire script. This means you can make changes to your pipeline code and apply them on-the-fly, which is particularly useful during development and testing.
+
+### How to Use Dynamic Reload
+
+To use the dynamic reload feature, follow these simple steps:
+
+1. Make your desired code changes in the pipeline modules.
+2. Focus on the main application window.
+3. Press the `Enter` key to trigger the reload process.
+
+The application will attempt to reload all pipeline modules and print the status of each reload in the console:
+
+- A message `Reloaded [module_name] successfully.` indicates a successful reload.
+- A message `Failed to reload [module_name]: [error_message]` indicates that there was an error during the reload of the specified module.
+
+### Error Handling
+
+If any of the pipeline modules fail to reload due to errors in the code, the feature will catch these exceptions and prevent the entire application from crashing. This way, you can simply fix the issue in the relevant module and try reloading again.
+
+### Benefits of Dynamic Reload
+
+- **Efficiency**: Eliminates the need for restarting the script to apply changes, saving time.
+- **Continuous Feedback**: Instantly test and debug your pipeline modifications.
+- **Stability**: Isolates errors to individual modules, maintaining overall application stability.
+
+### Important Notes
+
+- The dynamic reload feature does not reload the entire state of the script. Variables and objects outside of the module scope will retain their state from before the reload.
 
 ## Support
 

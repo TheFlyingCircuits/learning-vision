@@ -1,6 +1,6 @@
 import cv2
 import time
-import runPipeline.runPipeline as rp
+import pipelineManager as pm
 
 # Initialize the capture object to access the webcam; '0' signifies the default camera
 cap = cv2.VideoCapture(0)
@@ -74,7 +74,7 @@ while True:
         fps_text = "MAX"
 
     # Process the frame using a custom pipeline function, which returns a tuple where the second item is the processed frame
-    pipeline_out = rp.runPipeline(frame, [], pipeline_num)
+    pipeline_out = pm.manage(frame, [], pipeline_num)
     frame = pipeline_out[1]
 
     # Draw the FPS on the frame using the specified font, color (BGR), and line type
@@ -128,6 +128,9 @@ while True:
             mode = "cam"
         else:
             mode = "pic"
+
+    if key == 13:  # ASCII value for enter
+        pm.reloadPipelines()  # Reloads the pipelines without needing to restart entire script
 
 # After breaking out of the loop, release the webcam resource
 cap.release()

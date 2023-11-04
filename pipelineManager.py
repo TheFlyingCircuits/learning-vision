@@ -1,12 +1,13 @@
 import numpy as np
+import importlib
 
-import runPipeline.largestContour as largestContour
-import runPipeline.jackAttempt as jackAttempt
-import runPipeline.exampleGoal as exampleGoal
-import runPipeline.pretty as pretty
+import pipelines.largestContour as largestContour
+import pipelines.jackAttempt as jackAttempt
+import pipelines.exampleGoal as exampleGoal
+import pipelines.pretty as pretty
 
 
-def runPipeline(image, llrobot, pipeline_num):
+def manage(image, llrobot, pipeline_num):
     """
     Run a specified image processing pipeline on an input image.
 
@@ -55,3 +56,21 @@ def runPipeline(image, llrobot, pipeline_num):
     # If none of the above conditions are met (e.g., an unsupported 'pipeline_num' is provided),
     # return an empty numpy array, the original image, and the llrobot variable unchanged
     return np.array([]), image, llrobot
+
+
+def reloadPipelines():
+    '''Reload the pipeline modules to reflect any code changes dynamically, with error handling to prevent crashes.'''
+    # Create a list of tuples containing the module objects and their string names
+    modules_to_reload = [(largestContour, "largestContour"),
+                         (jackAttempt, "jackAttempt"),
+                         (exampleGoal, "exampleGoal"),
+                         (pretty, "pretty")]
+
+    for module, name in modules_to_reload:
+        try:
+            # Try to reload the module
+            importlib.reload(module)
+            print(f"Reloaded {name} successfully.")
+        except Exception as e:
+            # If there is an error, print the error message
+            print(f"Failed to reload {name}: {e}")
