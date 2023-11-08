@@ -48,6 +48,10 @@ while True:
     else:
         frame = img.copy()  # Uses a copy of the image to prevent it from smearing the FPS count
 
+    # Process the frame using a custom pipeline function, which returns a tuple where the second item is the processed frame
+    pipeline_out = pm.manage(frame, [], pipeline_num)
+    frame = pipeline_out[1]
+
     # Capture the current time to calculate FPS
     new_frame_time = time.time()
 
@@ -72,10 +76,6 @@ while True:
     else:
         # You can choose to display 'inf' or 'MAX' or any other indicator that makes sense in your context
         fps_text = "MAX"
-
-    # Process the frame using a custom pipeline function, which returns a tuple where the second item is the processed frame
-    pipeline_out = pm.manage(frame, [], pipeline_num)
-    frame = pipeline_out[1]
 
     # Draw the FPS on the frame using the specified font, color (BGR), and line type
     cv2.putText(frame, fps_text, (10, 30), font,
