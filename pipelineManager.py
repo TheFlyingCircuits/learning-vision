@@ -5,6 +5,7 @@ import pipelines.largestContour as largestContour
 import pipelines.jackAttempt as jackAttempt
 import pipelines.exampleGoal as exampleGoal
 import pipelines.pretty as pretty
+import pipelines.benAttempt as benAttempt
 
 
 def manage(image, llrobot, pipeline_num):
@@ -52,6 +53,8 @@ def manage(image, llrobot, pipeline_num):
         return exampleGoal.runPipeline(image, llrobot)
     elif pipeline_num == 4:
         return pretty.runPipeline(image, llrobot)
+    elif pipeline_num == 5:
+        return benAttempt.runPipeline(image, llrobot)
 
     # If none of the above conditions are met (e.g., an unsupported 'pipeline_num' is provided),
     # return an empty numpy array, the original image, and the llrobot variable unchanged
@@ -64,7 +67,8 @@ def reloadPipelines():
     modules_to_reload = [(largestContour, "largestContour"),
                          (jackAttempt, "jackAttempt"),
                          (exampleGoal, "exampleGoal"),
-                         (pretty, "pretty")]
+                         (pretty, "pretty"),
+                         (benAttempt, "benAttempt")]
 
     for module, name in modules_to_reload:
         try:
