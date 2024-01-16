@@ -38,12 +38,12 @@ def runPipeline(image, llrobot):
 
     imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
-    imgGrey = cv2.GaussianBlur(imgGrey, (7, 7), 0)
+    #imgGrey = cv2.GaussianBlur(imgGrey, (7, 7), 0)
 
     #imgGrey = cv2.adaptiveThreshold(imgGrey, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 3, 0)
     #imgGrey = cv2.erode(imgGrey, np.ones((3, 3), np.uint8))
     
-    canny = cv2.Canny(image, 1, 3, 3, L2gradient=True)
+    canny = cv2.Canny(image, 110, 225, 5, L2gradient=True)
 
     imgGrey = np.float32(imgGrey/255)
 
@@ -62,42 +62,90 @@ def runPipeline(image, llrobot):
 
     #you can pull this out of runPipeline to save a lil time?
     kMaxRPixels = int(math.sqrt(imgGrey.shape[0]**2 + imgGrey.shape[1]**2))
-    houghSpace, rHistEdges, tHistEdges = np.histogram2d(r.flatten(), angles.flatten(), bins=[400, 360], range=[[-kMaxRPixels, kMaxRPixels],[-180, 180]], weights=magnitudes.flatten())
+    rbins = kMaxRPixels
+    tbins = 3600
+    
+    
+    # rHistEdges = np.histogram_bin_edges(r.flatten(), bins='sqrt')
+    # tHistEdges = np.histogram_bin_edges(angles.flatten(), bins='sqrt')
+    
+    houghSpace, rHistEdges, tHistEdges = np.histogram2d(
+        r.flatten(), 
+        angles.flatten(), 
+        bins=[rbins,tbins],
+        range=[[-kMaxRPixels, kMaxRPixels],[-180, 180]], 
+        weights=magnitudes.flatten()
+    )
 
     #non-max suppression: gets rid of all points that aren't maximums by using cv2.dilate()
-    houghSpace[cv2.dilate(houghSpace, np.ones((5, 8), np.float32))-houghSpace!=0] = 0
+    #houghSpace[cv2.dilate(houghSpace, np.ones((int(rbins/8), int(tbins/70)), np.float32), borderType=cv2.BORDER_WRAP)-houghSpace!=0] = 0
     
     #get arrays of indices of maximum points in hough space
     sortedRows, sortedCols = np.unravel_index(np.argsort(houghSpace, axis=None), houghSpace.shape)
+    sortedVals = np.sort(houghSpace, axis=None)/np.max(houghSpace)
 
     #convert from histogram indices into actual r and theta
     sortedRows = rHistEdges[sortedRows]
     sortedCols = tHistEdges[sortedCols]
 
     #convert two separate x and y arrays into array of individual coordinates as tuples
-    topRows = np.flip(sortedRows[-10:]).tolist()
-    topCols = np.flip(sortedCols[-10:]).tolist()
-    topLines = list(zip(topRows, topCols))
+    topRows = np.flip(sortedRows).tolist()
+    topCols = np.flip(sortedCols).tolist()
+    topVals = np.flip(sortedVals).tolist()
+    topLines = list(zip(topRows, topCols, topVals))
     
-
+    #strongLines = cv2.HoughLines(canny, 1, math.pi/180, 10)
+    strongLines = topLines
     
     
     strongLines = [topLines[0]]
     
-    rThreshold = 10
-    tThreshold = 10
+    rThreshold = 50
+    tThreshold = 8
     
     for line in topLines:
-        if len(strongLines) >= 8:
+        
+        if len(strongLines) >= 50:
             break
+        
+        if line[2] > 3:
+            continue
         
         isStrongLine = True
         
         for strongLine in strongLines:
             
-            #print(line, strongLine)
+    
             deltaR = abs(line[0] - strongLine[0])
             deltaT = abs(line[1] - strongLine[1])
+            
+            # if deltaT < tThreshold:
+                
+            #     a=math.cos(math.radians(line[1]))
+            #     b=math.sin(math.radians(line[1]))
+                
+            #     d=math.cos(math.radians(strongLine[1]))
+            #     e=math.sin(math.radians(strongLine[1]))
+            
+            #     c=line[0]
+            #     f=strongLine[0]
+            
+            #     #lines are parallel
+            #     if abs(a*e-b*d) < 0.01:
+            #         #TODO: check r
+            #         if deltaR < rThreshold:
+            #             isStrongLine = False
+            #             break
+            #         continue
+                
+            #     intersectX = (c*e-b*f)/(a*e-b*d)
+            #     intersectY = (a*f-c*d)/(a*e-b*d)
+                
+            #     if (intersectX < imgGrey.shape[1] and intersectX > 0 and intersectY < imgGrey.shape[0] and intersectY > 0):
+            #         #intersection is on the screen and thetas are similar, so eliminate this line
+            #         isStrongLine = False
+            #         break
+
             if deltaR < rThreshold and deltaT < tThreshold:
                 isStrongLine = False
                 break
@@ -156,7 +204,7 @@ def runPipeline(image, llrobot):
     
     
     
-    blurredMagnitudes = cv2.GaussianBlur(magnitudes, (0, 0), 1)
+    blurredMagnitudes = cv2.GaussianBlur(magnitudes, (3, 3), 0.)
     
     lineSegments = []
     
@@ -180,7 +228,7 @@ def runPipeline(image, llrobot):
             yMid = (y1+y2)/2
         
             
-            if (blurredMagnitudes[int(yMid)][int(xMid)] > 0.001):
+            if (blurredMagnitudes[int(yMid)][int(xMid)] > 0.005):
                 #current mini-segment is valid
                 
                 if startX == None and startY == None:
@@ -234,24 +282,29 @@ def runPipeline(image, llrobot):
 
 
         #print(maxR, maxTheta)
-
-        cv2.line(rgbImage, (x1, y1), (x2, y2), (255, 255, 255), 1)
+        if maxR > 0:
+            cv2.line(image, (x1, y1), (x2, y2), (0, 0, 255*coord[2]), 2)
+        else:
+            cv2.line(image, (x1, y1), (x2, y2), (0, 255*coord[2], 0), 2)
         
     for segment in lineSegments:
         
         x1, y1, x2, y2 = segment
         
-        cv2.line(rgbImage, np.int16((x1, y1)), np.int16((x2, y2)), (255, 255, 0), 3)
+        #cv2.line(image, np.int16((x1, y1)), np.int16((x2, y2)), (255, 255, 0), 2)
     
         
     for line in lineIntersections:
         for point in line:
-            rgbImage = cv2.circle(rgbImage, np.int16(point), radius=5, color = (0,255,0), thickness=-1)
+            pass
+            #cv2.circle(image, np.int16(point), radius=5, color = (0,255,0), thickness=-1)
 
     houghSpace = np.uint8(255*houghSpace)
     houghSpace = cv2.cvtColor(houghSpace, cv2.COLOR_GRAY2RGB)
     #houghSpace = cv2.circle(houghSpace, houghMaxCoords, radius=2, color=(0, 255, 0), thickness=-1)
 
-    return np.array([[]]), rgbImage, llrobot
+    
+    image[canny > 0] = (0, 0, 255)
+    return np.array([[]]), image, llrobot
 
     

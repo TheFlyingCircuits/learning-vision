@@ -1,11 +1,12 @@
 import cv2
 import time
 import pipelineManager as pm
+import os
 
 # Initialize the capture object to access the webcam; '0' signifies the default camera
 cap = cv2.VideoCapture(0)
 # Read an image from the filesystem, this image is loaded once for 'pic' mode
-img = cv2.imread("image.png")
+img = cv2.imread("images/GeneralField1.jpg")
 
 # Define the mode of operation, 'cam' for webcam, 'pic' for static image processing
 mode = "cam"
@@ -18,7 +19,7 @@ if not cap.isOpened():
     exit(1)
 
 # Variable to keep track of which pipeline to run
-pipeline_num = 0
+pipeline_num = 5
 # Set the width of the frames captured from the webcam to 1280 pixels
 cap.set(3, 1280)
 # Set the height of the frames captured from the webcam to 960 pixels
@@ -31,6 +32,9 @@ prev_frame_time = 0
 
 # Choose the font type for the FPS display on the frame
 font = cv2.FONT_HERSHEY_SIMPLEX
+
+#generates list of all files in images folder
+imgFiles = os.listdir("images")
 
 # Start an infinite loop to continuously capture frames from the webcam
 while True:
@@ -91,6 +95,7 @@ while True:
         break
 
     # Check if one of the keys for changing resolution or FPS is pressed
+    #TODO: this doesn't work
     if key in [ord('z'), ord('x'), ord('c'), ord('v')]:
         # Stop capturing from the webcam before changing settings
         cap.release()
@@ -116,10 +121,11 @@ while True:
             cap.set(4, 960)  # Set height to 960 pixels
             cap.set(cv2.CAP_PROP_FPS, 22)  # Set FPS to 22
 
-    # Check if the key pressed is a digit key to select the pipeline number
+    # Check if the key pressed is a digit key to select
     if 48 <= key <= 57:  # ASCII values for '0' to '9'
-        # Convert the ASCII value to the corresponding integer (0-9)
-        pipeline_num = key - 48
+        fileName = "images/" + imgFiles[key-48]
+        print(fileName)
+        img = cv2.imread(fileName)
 
     # Toggle between 'cam' and 'pic' modes when the spacebar is pressed
     if key == 32:  # ASCII value for the spacebar
@@ -131,6 +137,13 @@ while True:
 
     if key == 13:  # ASCII value for enter
         pm.reloadPipelines()  # Reloads the pipelines without needing to restart entire script
+        
+    if key == ord('a'):
+        #switch to default open pipeline
+        if pipeline_num==5:
+            pipeline_num = 0
+        else:
+            pipeline_num =5
 
 # After breaking out of the loop, release the webcam resource
 cap.release()
