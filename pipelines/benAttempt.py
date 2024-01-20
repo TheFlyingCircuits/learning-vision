@@ -1,7 +1,9 @@
 import cv2
 import numpy as np
 import math
-
+import visutils
+import multiprocessing as mp
+from itertools import repeat
 
 #applies scharr filter, returns arrays of magnitude and angle
 #magnitude is normalized to 1, angle is normalized from -180 to 180
@@ -21,95 +23,122 @@ def findEdges(imgGrey):
     gradientY = cv2.filter2D(imgGrey, -1, scharrYKernel, borderType=cv2.BORDER_REPLICATE)
 
     magnitude = np.sqrt(gradientX*gradientX+gradientY*gradientY)
+    
+    inverseMagnitudes = np.where(magnitude > 0, 1/magnitude, 0)
 
     maxMagnitude = magnitude.max()#math.sqrt(2*256*256)
     magnitude /= maxMagnitude
+    
+    
+    gradientX *= inverseMagnitudes
+    gradientY *= inverseMagnitudes
 
     angle = np.arctan2(gradientY, gradientX)*180/math.pi
 
-    return magnitude, angle
+    return magnitude, angle, gradientX, gradientY
 
-
-
-
-def runPipeline(image, llrobot):
+def houghSpacePerComponent(args):
+    i, r, angles, labels = args
     
-
-
-    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    kImgShape=angles.shape
     
-    #imgGrey = cv2.GaussianBlur(imgGrey, (7, 7), 0)
-
-    #imgGrey = cv2.adaptiveThreshold(imgGrey, 1, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 3, 0)
-    #imgGrey = cv2.erode(imgGrey, np.ones((3, 3), np.uint8))
+    #TODO: take constants out of main loop
+    kMaxRPixels = int(math.sqrt(kImgShape[0]**2 + kImgShape[1]**2))
+    rbins = int(kMaxRPixels)
+    tbins = 1800
     
-    canny = cv2.Canny(image, 110, 225, 5, L2gradient=True)
-
-    imgGrey = np.float32(imgGrey/255)
-
-    magnitudes, angles = findEdges(imgGrey)
-
-    #uses canny filter to get rid of extra points
-    magnitudes[canny==0] = 0
-
-
-
-    indices = np.indices(imgGrey.shape)
-    xCoords = indices[1]
-    yCoords = indices[0]
-
-    r = xCoords*np.cos(np.radians(angles)) + yCoords*np.sin(np.radians(angles))
-
-    #you can pull this out of runPipeline to save a lil time?
-    kMaxRPixels = int(math.sqrt(imgGrey.shape[0]**2 + imgGrey.shape[1]**2))
-    rbins = kMaxRPixels
-    tbins = 3600
-    
-    
-    # rHistEdges = np.histogram_bin_edges(r.flatten(), bins='sqrt')
-    # tHistEdges = np.histogram_bin_edges(angles.flatten(), bins='sqrt')
-    
-    houghSpace, rHistEdges, tHistEdges = np.histogram2d(
-        r.flatten(), 
-        angles.flatten(), 
-        bins=[rbins,tbins],
-        range=[[-kMaxRPixels, kMaxRPixels],[-180, 180]], 
-        weights=magnitudes.flatten()
+    houghSpace = cv2.calcHist(
+        [r, angles],
+        [0, 1],
+        (labels==i).astype(np.uint8),
+        [rbins, tbins], 
+        [-kMaxRPixels,kMaxRPixels,-180,180]
     )
 
-    #non-max suppression: gets rid of all points that aren't maximums by using cv2.dilate()
-    #houghSpace[cv2.dilate(houghSpace, np.ones((int(rbins/8), int(tbins/70)), np.float32), borderType=cv2.BORDER_WRAP)-houghSpace!=0] = 0
     
-    #get arrays of indices of maximum points in hough space
-    sortedRows, sortedCols = np.unravel_index(np.argsort(houghSpace, axis=None), houghSpace.shape)
-    sortedVals = np.sort(houghSpace, axis=None)/np.max(houghSpace)
+    
+    rHistEdges = np.linspace(-kMaxRPixels, kMaxRPixels, rbins, True)
+    tHistEdges = np.linspace(-180, 180, tbins, True)
+    
+    
+    # houghSpace, rHistEdges, tHistEdges = np.histogram2d(
+    #     r.flatten(), 
+    #     angles.flatten(), 
+    #     bins=[rbins,tbins],
+    #     range=[[-kMaxRPixels, kMaxRPixels],[-180, 180]], 
+    #     #weights=cMagnitudes.flatten()
+    # )
+    
+    # houghSpace = cv2.GaussianBlur(houghSpace, (0, 0), 8)
+    #visutils.showHeatMap(houghSpace/np.max(houghSpace), "houghSpace")
+    
+    
+    topRows, topCols = np.unravel_index(np.argpartition(houghSpace, -4, axis=None)[-50:], houghSpace.shape)
+    #TODO: sort after partitioning
+    #topRows, topCols = np.unravel_index(np.argsort(houghSpace, axis=None)[-50:], houghSpace.shape)
+    
+    topR = np.flip(rHistEdges[topRows]).tolist()
+    topT = np.flip(tHistEdges[topCols]).tolist()
+    topVal = np.flip(houghSpace[topRows, topCols]).tolist()
+    
+    return cullDuplicateLines(list(zip(topR, topT, topVal)), 4, 100, 12)
 
-    #convert from histogram indices into actual r and theta
-    sortedRows = rHistEdges[sortedRows]
-    sortedCols = tHistEdges[sortedCols]
+#@profile
+def componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny):
+    nComponents, labels, stats, centroids = cv2.connectedComponentsWithStats(canny, connectivity=8)
+    
+    kImgShape=labels.shape
+    indices = np.indices(kImgShape, dtype=np.float32)
+    xCoords = indices[1]
+    yCoords = indices[0]
+    
+    #gradientX is equivalent to cosine, likewise for sine
+    r = xCoords*gradientX + yCoords*gradientY
 
-    #convert two separate x and y arrays into array of individual coordinates as tuples
-    topRows = np.flip(sortedRows).tolist()
-    topCols = np.flip(sortedCols).tolist()
-    topVals = np.flip(sortedVals).tolist()
-    topLines = list(zip(topRows, topCols, topVals))
+    strongLines = []
     
-    #strongLines = cv2.HoughLines(canny, 1, math.pi/180, 10)
-    strongLines = topLines
+    areas = stats[:,cv2.CC_STAT_AREA]
+    widths = stats[:,cv2.CC_STAT_WIDTH]
+    heights = stats[:,cv2.CC_STAT_HEIGHT]
+    validComponents = np.where((areas > 100) & (areas < 700) & (0.75 < (widths/heights)) & ((widths/heights) < 1.25))[0]
     
     
+    
+    areasList = areas.tolist()
+     
+    labelsToShow = np.where(np.isin(labels, validComponents), labels, 0)
+    
+    #clickX, clickY, _ = visutils.showConnectedComponents(labelsToShow, stats, "connectedComponents")
+    #clickedComponent = labels[clickY, clickX]
+    #validComponents = [clickedComponent]
+    
+    #iterate through connected components and apply hough space to each one
+    # for i in validComponents:
+    
+    args=[(i, r, angles, labels) for i in validComponents]
+    
+    print("name: ", __name__)
+    if True and __name__ == "pipelines.benAttempt":
+        print("AA")
+        with mp.Pool() as p:
+            results=p.map(houghSpacePerComponent, args)
+        print(results)
+    else:
+        print("BB")
+        results = map(houghSpacePerComponent, args)
+
+
+   # breakpoint()
+    
+    return strongLines
+
+def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
     strongLines = [topLines[0]]
-    
-    rThreshold = 50
-    tThreshold = 8
     
     for line in topLines:
         
-        if len(strongLines) >= 50:
+        if len(strongLines) >= targetNumLines:
             break
-        
-        if line[2] > 3:
-            continue
         
         isStrongLine = True
         
@@ -151,21 +180,13 @@ def runPipeline(image, llrobot):
                 break
             
         if isStrongLine:
-            strongLines.append(line)    
-                
+            strongLines.append(line)
     
-    
-    
-    
+    return strongLines
 
+def findIntersections(strongLines, kImgShape):
     #list of lists of intersections, each sublist represents one line
     lineIntersections = []
-
-    #add border lines so that line intersection also includes intersections with border
-    # strongLines.append((0, 0))
-    # strongLines.append((0, 90))
-    # strongLines.append((540, 0))
-    # strongLines.append((200, 90))
 
 
     #generates lineIntersections
@@ -195,15 +216,14 @@ def runPipeline(image, llrobot):
             intersectY = (a*f-c*d)/(a*e-b*d)
             
             #only checks for intersections on the screen
-            if intersectX > imgGrey.shape[1] or intersectX < -1 or intersectY > imgGrey.shape[0] or intersectY < -1:
+            if intersectX > kImgShape[1] or intersectX < -1 or intersectY > kImgShape[0] or intersectY < -1:
                 continue
             
             lineIntersections[cnt].append((intersectX, intersectY))
+    
+    return lineIntersections
 
-    
-    
-    
-    
+def generateLineSegments(lineIntersections, magnitudes):
     blurredMagnitudes = cv2.GaussianBlur(magnitudes, (3, 3), 0.)
     
     lineSegments = []
@@ -237,6 +257,7 @@ def runPipeline(image, llrobot):
                     startY = y1
                 
                 if i == len(line)-2:
+                    #if reached the last mini-segment, end the line segment here
                     lineSegments.append((startX, startY, x2, y2))
                     
             else:
@@ -248,21 +269,36 @@ def runPipeline(image, llrobot):
                     
                 startX = None
                 startY = None
-        
-        
+                
+    return lineSegments
 
+def runPipeline(image, llrobot):
+    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    kImgShape = imgGrey.shape
     
+    imgGrey = np.float32(imgGrey/255)
+    magnitudes, angles, gradientX, gradientY = findEdges(imgGrey)
 
+    #uses canny filter to get rid of extra points
+    canny = cv2.Canny(image, 110, 225, 5, L2gradient=True)
+    magnitudes[canny==0] = 0
 
+    strongLines = componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny)
+   
+    if (len(strongLines) > 0):
+        visutils.drawHoughLines(np.array(strongLines), image, "houghLines")
 
+    #OUTPUTS AND VISUALIZATION
+
+    """
     #normalize magnitude and angle into units that cv2 likes
     magnitudes = np.uint8(255*magnitudes)
-    angles = angles/2 + 90
-    angles = np.uint8(angles)
-    saturation = np.full(imgGrey.shape, 255, dtype=np.uint8)
-    hsvImage = cv2.merge([angles, saturation, magnitudes])
+    angles = np.uint8(angles/2 + 90)
+    hsvImage = cv2.merge([angles, np.full(imgGrey.shape, 255, dtype=np.uint8), magnitudes])
     rgbImage = cv2.cvtColor(hsvImage, cv2.COLOR_HSV2BGR)
-
+    
+    image[canny > 0] = (0, 0, 255)
+    
     for coord in strongLines:
 
         maxR = coord[0]
@@ -281,12 +317,13 @@ def runPipeline(image, llrobot):
 
 
 
-        #print(maxR, maxTheta)
+        print(maxR, maxTheta)
         if maxR > 0:
-            cv2.line(image, (x1, y1), (x2, y2), (0, 0, 255*coord[2]), 2)
+            cv2.line(image, (x1, y1), (x2, y2), (0, 0, 255), 2)
         else:
-            cv2.line(image, (x1, y1), (x2, y2), (0, 255*coord[2], 0), 2)
-        
+            cv2.line(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            
+    
     for segment in lineSegments:
         
         x1, y1, x2, y2 = segment
@@ -299,12 +336,15 @@ def runPipeline(image, llrobot):
             pass
             #cv2.circle(image, np.int16(point), radius=5, color = (0,255,0), thickness=-1)
 
+    
+
     houghSpace = np.uint8(255*houghSpace)
     houghSpace = cv2.cvtColor(houghSpace, cv2.COLOR_GRAY2RGB)
     #houghSpace = cv2.circle(houghSpace, houghMaxCoords, radius=2, color=(0, 255, 0), thickness=-1)
 
+    """
     
-    image[canny > 0] = (0, 0, 255)
+    
     return np.array([[]]), image, llrobot
 
     
