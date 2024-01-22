@@ -3,7 +3,7 @@ import numpy as np
 import math
 import visutils
 import multiprocessing as mp
-from itertools import repeat
+import itertools
 
 #applies scharr filter, returns arrays of magnitude and angle
 #magnitude is normalized to 1, angle is normalized from -180 to 180
@@ -26,9 +26,7 @@ def findEdges(imgGrey):
     
     inverseMagnitudes = np.where(magnitude > 0, 1/magnitude, 0)
 
-    maxMagnitude = magnitude.max()#math.sqrt(2*256*256)
-    magnitude /= maxMagnitude
-    
+    magnitude /= magnitude.max()
     
     gradientX *= inverseMagnitudes
     gradientY *= inverseMagnitudes
@@ -37,6 +35,7 @@ def findEdges(imgGrey):
 
     return magnitude, angle, gradientX, gradientY
 
+@profile
 def houghSpacePerComponent(args):
     i, r, angles, labels = args
     
@@ -44,13 +43,14 @@ def houghSpacePerComponent(args):
     
     #TODO: take constants out of main loop
     kMaxRPixels = int(math.sqrt(kImgShape[0]**2 + kImgShape[1]**2))
-    rbins = int(kMaxRPixels)
-    tbins = 1800
+    rbins = int(kMaxRPixels/3)
+    tbins = 1600
+
     
     houghSpace = cv2.calcHist(
         [r, angles],
         [0, 1],
-        (labels==i).astype(np.uint8),
+        (labels==i).astype(np.uint8, copy=False),
         [rbins, tbins], 
         [-kMaxRPixels,kMaxRPixels,-180,180]
     )
@@ -73,9 +73,21 @@ def houghSpacePerComponent(args):
     #visutils.showHeatMap(houghSpace/np.max(houghSpace), "houghSpace")
     
     
-    topRows, topCols = np.unravel_index(np.argpartition(houghSpace, -4, axis=None)[-50:], houghSpace.shape)
-    #TODO: sort after partitioning
-    #topRows, topCols = np.unravel_index(np.argsort(houghSpace, axis=None)[-50:], houghSpace.shape)
+    
+    #grabs only the nonzero elements of houghSpace, then argpartitions
+    #topInds are the indices into houghSpace[houghSpace>0]
+    #for example, if a value in topInds == 0, that refers to the first nonzero element in the hough space
+    topInds = np.argpartition(houghSpace[houghSpace>0], -20, axis=None)[-20:]
+
+    
+    #plug in topInds into indices of nonzero elements, going to coordinates in the hough space
+    topRows, topCols = np.indices(houghSpace.shape)
+    #np.nonzero(houghSpace)
+    
+    topRows = topRows[houghSpace > 0]
+    topCols = topCols[houghSpace > 0]
+    topRows = topRows[topInds]
+    topCols = topCols[topInds]
     
     topR = np.flip(rHistEdges[topRows]).tolist()
     topT = np.flip(tHistEdges[topCols]).tolist()
@@ -83,7 +95,7 @@ def houghSpacePerComponent(args):
     
     return cullDuplicateLines(list(zip(topR, topT, topVal)), 4, 100, 12)
 
-#@profile
+@profile
 def componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny):
     nComponents, labels, stats, centroids = cv2.connectedComponentsWithStats(canny, connectivity=8)
     
@@ -108,29 +120,22 @@ def componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny):
      
     labelsToShow = np.where(np.isin(labels, validComponents), labels, 0)
     
-    #clickX, clickY, _ = visutils.showConnectedComponents(labelsToShow, stats, "connectedComponents")
-    #clickedComponent = labels[clickY, clickX]
-    #validComponents = [clickedComponent]
-    
-    #iterate through connected components and apply hough space to each one
-    # for i in validComponents:
+    clickX, clickY, _ = visutils.showConnectedComponents(labelsToShow, stats, "connectedComponents")
+    # print(clickX, clickY)
+    # clickedComponent = labels[clickY, clickX]
+    # validComponents = [clickedComponent]
     
     args=[(i, r, angles, labels) for i in validComponents]
     
-    print("name: ", __name__)
-    if True and __name__ == "pipelines.benAttempt":
-        print("AA")
+    
+    #multiprocessing
+    if False:
         with mp.Pool() as p:
             results=p.map(houghSpacePerComponent, args)
-        print(results)
-    else:
-        print("BB")
-        results = map(houghSpacePerComponent, args)
-
-
-   # breakpoint()
+            
+    results = [houghSpacePerComponent(arg) for arg in args]
     
-    return strongLines
+    return list(itertools.chain.from_iterable(results))
 
 def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
     strongLines = [topLines[0]]
@@ -176,9 +181,15 @@ def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
             #         break
 
             if deltaR < rThreshold and deltaT < tThreshold:
-                isStrongLine = False
+                #this line matches with a previous line
+                
+                if line[2] > strongLine[2]:
+                    #if this line is stronger than the one in the list, replace it
+                    strongLines.remove(strongLine) #technically remove is slow, but strongLines is max length 4 anyways so
+                else:
+                    #otherwise, break out of the loop and don't add the line
+                    isStrongLine = False
                 break
-            
         if isStrongLine:
             strongLines.append(line)
     
@@ -273,15 +284,13 @@ def generateLineSegments(lineIntersections, magnitudes):
     return lineSegments
 
 def runPipeline(image, llrobot):
-    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)/255
     kImgShape = imgGrey.shape
     
-    imgGrey = np.float32(imgGrey/255)
     magnitudes, angles, gradientX, gradientY = findEdges(imgGrey)
 
     #uses canny filter to get rid of extra points
     canny = cv2.Canny(image, 110, 225, 5, L2gradient=True)
-    magnitudes[canny==0] = 0
 
     strongLines = componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny)
    
