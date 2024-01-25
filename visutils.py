@@ -640,8 +640,8 @@ def drawHoughLines(strongLines, sourceImage, windowName, splitLinePoints=None):
     # do the drawing
     width = canvas.shape[1]
     height = canvas.shape[0]
-    originX = 0#(width-1)/2
-    originY = 0#(height-1)/2
+    originX = (width-1)/2
+    originY = (height-1)/2
  
     for i in drawMeIndices:
         theta = angles[i]
@@ -656,9 +656,9 @@ def drawHoughLines(strongLines, sourceImage, windowName, splitLinePoints=None):
         x2, y2 = x0 - t * alongX, y0 - t * alongY
  
         if (radius >= 0):
-            lineColor = (255, 0, 0)
+            lineColor = (int(255*scores[i]), 0, 0)
         else:
-            lineColor = (0, 0, 255)
+            lineColor = (0, 0, int(255*scores[i]))
  
         cv.line(canvas, (int(x1),int(y1)), (int(x2),int(y2)), color=lineColor)
  

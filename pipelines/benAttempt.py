@@ -5,8 +5,24 @@ import visutils
 import multiprocessing as mp
 import itertools
 
+
+kImgShape = (720, 1280)
+imgGrey = np.zeros(kImgShape, dtype=np.float32)
+canny = np.zeros(kImgShape, dtype=np.uint8)
+magnitude = np.zeros(kImgShape, dtype=np.float32)
+angle = np.zeros(kImgShape, dtype=np.float32)
+gradientX = np.zeros(kImgShape, dtype=np.float32)
+gradientY = np.zeros(kImgShape, dtype=np.float32)
+inverseMagnitudes = np.zeros_like(magnitude)
+labels = np.zeros_like(magnitude, dtype=np.int32)
+xCoords, yCoords = np.indices(kImgShape, dtype=np.float32)
+xCoords-=int((kImgShape[1]-1)/2)
+yCoords-=int((kImgShape[0]-1)/2)
+r = np.zeros(kImgShape, dtype=np.float32)
+
 #applies scharr filter, returns arrays of magnitude and angle
 #magnitude is normalized to 1, angle is normalized from -180 to 180
+@profile
 def findEdges(imgGrey):
     #optimal 3x3 kernel for scharr filter according to wikipedia
     scharrXKernel = np.array(
@@ -18,34 +34,80 @@ def findEdges(imgGrey):
         [[-47, -162, -47],
         [0, 0, 0],
         [47, 162, 47]])
-
-    gradientX = cv2.filter2D(imgGrey, -1, scharrXKernel, borderType=cv2.BORDER_REPLICATE)
-    gradientY = cv2.filter2D(imgGrey, -1, scharrYKernel, borderType=cv2.BORDER_REPLICATE)
-
-    magnitude = np.sqrt(gradientX*gradientX+gradientY*gradientY)
     
-    inverseMagnitudes = np.where(magnitude > 0, 1/magnitude, 0)
+    global gradientX, gradientY, magnitude, angle, inverseMagnitudes
+    gradientX = cv2.filter2D(imgGrey, -1, scharrXKernel, gradientX, borderType=cv2.BORDER_REPLICATE)
+    gradientY = cv2.filter2D(imgGrey, -1, scharrYKernel, gradientY, borderType=cv2.BORDER_REPLICATE)
 
-    magnitude /= magnitude.max()
+    magnitude, angle = cv2.cartToPolar(gradientX, gradientY, magnitude, angle, angleInDegrees=True)
+    angle -= 180
+    
+    inverseMagnitudes = np.divide(1, magnitude, out=inverseMagnitudes, where=(magnitude > 0))
     
     gradientX *= inverseMagnitudes
     gradientY *= inverseMagnitudes
 
-    angle = np.arctan2(gradientY, gradientX)*180/math.pi
-
     return magnitude, angle, gradientX, gradientY
+
+@profile
+def componentHoughTransform(angles, gradientX, gradientY, canny):
+    
+    global labels, xCoords, yCoords, r
+    nComponents, labels, stats, centroids = cv2.connectedComponentsWithStats(canny, labels=labels, connectivity=8)
+    
+    
+    #gradientX is equivalent to cosine, likewise for sine
+    r = np.multiply(xCoords, gradientX, r,)
+    r += np.multiply(yCoords, gradientY) 
+    
+    areas = stats[:,cv2.CC_STAT_AREA]
+    widths = stats[:,cv2.CC_STAT_WIDTH]
+    heights = stats[:,cv2.CC_STAT_HEIGHT]
+    
+    #limits for valid components:
+    #can't be too big or too small
+    #can't be too wide/tall
+    #area should be a lil less than ~4x width and height (there are 4 sides)
+    validComponents = np.where((areas > 100) & (areas < 700) & 
+                               ((widths/heights) < 1.3) & (heights/widths < 1.5) &
+                               (areas/widths < 4.5) & (areas/widths > 3.) &
+                               (areas/heights < 4.5) & (areas/heights > 3.))[0]
+    
+    
+
+     
+    labelsToShow = np.where(np.isin(labels, validComponents), labels, 0)
+    clickX, clickY, _ = visutils.showConnectedComponents(labelsToShow, stats, "connectedComponents")
+    # clickedComponent = labels[clickY, clickX]
+    # print(clickedComponent)
+    # validComponents = [clickedComponent]
+    
+    
+    args=[(i, r, angles, labels) for i in validComponents]
+    
+    
+    #multiprocessing
+    if False:
+        with mp.Pool() as p:
+            results=p.map(houghSpacePerComponent, args)
+            
+    results = [houghSpacePerComponent(arg) for arg in args]
+    
+    return results
+
 
 @profile
 def houghSpacePerComponent(args):
     i, r, angles, labels = args
     
+    
     kImgShape=angles.shape
     
-    #TODO: take constants out of main loop
     kMaxRPixels = int(math.sqrt(kImgShape[0]**2 + kImgShape[1]**2))
-    rbins = int(kMaxRPixels/3)
+    rbins = int(kMaxRPixels/2) #should be divided by 2 for 1-pixel accuracy
     tbins = 1600
-
+    
+    print(np.max(r), np.max(angles))
     
     houghSpace = cv2.calcHist(
         [r, angles],
@@ -77,13 +139,17 @@ def houghSpacePerComponent(args):
     #grabs only the nonzero elements of houghSpace, then argpartitions
     #topInds are the indices into houghSpace[houghSpace>0]
     #for example, if a value in topInds == 0, that refers to the first nonzero element in the hough space
-    topInds = np.argpartition(houghSpace[houghSpace>0], -20, axis=None)[-20:]
+    
+    #print(houghSpace[houghSpace>0].shape[0])
+    if houghSpace[houghSpace>0].shape[0] <= 30:
+        return []
+        
+    
+    topInds = np.argpartition(houghSpace[houghSpace>0], -30, axis=None)[-30:]
 
     
     #plug in topInds into indices of nonzero elements, going to coordinates in the hough space
     topRows, topCols = np.indices(houghSpace.shape)
-    #np.nonzero(houghSpace)
-    
     topRows = topRows[houghSpace > 0]
     topCols = topCols[houghSpace > 0]
     topRows = topRows[topInds]
@@ -93,51 +159,14 @@ def houghSpacePerComponent(args):
     topT = np.flip(tHistEdges[topCols]).tolist()
     topVal = np.flip(houghSpace[topRows, topCols]).tolist()
     
-    return cullDuplicateLines(list(zip(topR, topT, topVal)), 4, 100, 12)
+    topLines = sorted(list(zip(topR, topT, topVal)), key=lambda line: line[2], reverse=True)
+    
+    #return topLines
+    return cullDuplicateLines(topLines, 4, 100, 20)
 
-@profile
-def componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny):
-    nComponents, labels, stats, centroids = cv2.connectedComponentsWithStats(canny, connectivity=8)
-    
-    kImgShape=labels.shape
-    indices = np.indices(kImgShape, dtype=np.float32)
-    xCoords = indices[1]
-    yCoords = indices[0]
-    
-    #gradientX is equivalent to cosine, likewise for sine
-    r = xCoords*gradientX + yCoords*gradientY
-
-    strongLines = []
-    
-    areas = stats[:,cv2.CC_STAT_AREA]
-    widths = stats[:,cv2.CC_STAT_WIDTH]
-    heights = stats[:,cv2.CC_STAT_HEIGHT]
-    validComponents = np.where((areas > 100) & (areas < 700) & (0.75 < (widths/heights)) & ((widths/heights) < 1.25))[0]
-    
-    
-    
-    areasList = areas.tolist()
-     
-    labelsToShow = np.where(np.isin(labels, validComponents), labels, 0)
-    
-    clickX, clickY, _ = visutils.showConnectedComponents(labelsToShow, stats, "connectedComponents")
-    # print(clickX, clickY)
-    # clickedComponent = labels[clickY, clickX]
-    # validComponents = [clickedComponent]
-    
-    args=[(i, r, angles, labels) for i in validComponents]
-    
-    
-    #multiprocessing
-    if False:
-        with mp.Pool() as p:
-            results=p.map(houghSpacePerComponent, args)
-            
-    results = [houghSpacePerComponent(arg) for arg in args]
-    
-    return list(itertools.chain.from_iterable(results))
 
 def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
+    
     strongLines = [topLines[0]]
     
     for line in topLines:
@@ -180,9 +209,8 @@ def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
             #         isStrongLine = False
             #         break
 
-            if deltaR < rThreshold and deltaT < tThreshold:
+            if (deltaR < rThreshold) and (deltaT < tThreshold):
                 #this line matches with a previous line
-                
                 if line[2] > strongLine[2]:
                     #if this line is stronger than the one in the list, replace it
                     strongLines.remove(strongLine) #technically remove is slow, but strongLines is max length 4 anyways so
@@ -190,12 +218,38 @@ def cullDuplicateLines(topLines, targetNumLines, rThreshold, tThreshold):
                     #otherwise, break out of the loop and don't add the line
                     isStrongLine = False
                 break
+            
         if isStrongLine:
             strongLines.append(line)
     
     return strongLines
 
-def findIntersections(strongLines, kImgShape):
+def findIntersectionsPerComponent(houghLines, kImgShape):
+    lineIntersections = []
+    for line1 in houghLines:
+        for line2 in houghLines:
+            a=math.cos(math.radians(line1[1]))
+            b=math.sin(math.radians(line1[1]))
+            
+            d=math.cos(math.radians(line2[1]))
+            e=math.sin(math.radians(line2[1]))
+            
+            c=line1[0]
+            f=line2[0]
+            
+            if abs(a*e-b*d) == 0.00:
+                continue
+
+            intersectX = (c*e-b*f)/(a*e-b*d)
+            intersectY = (a*f-c*d)/(a*e-b*d)
+            
+            #only checks for intersections on the screen
+            if intersectX > kImgShape[1] or intersectX < -1 or intersectY > kImgShape[0] or intersectY < -1:
+                continue
+            
+            lineIntersections.append((intersectX, intersectY))
+
+def findIntersectionsOld(strongLines, kImgShape):
     #list of lists of intersections, each sublist represents one line
     lineIntersections = []
 
@@ -284,16 +338,23 @@ def generateLineSegments(lineIntersections, magnitudes):
     return lineSegments
 
 def runPipeline(image, llrobot):
-    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32)/255
+    global imgGrey, canny
+    
+    imgGrey = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY, imgGrey).astype(np.float32)/255
     kImgShape = imgGrey.shape
     
     magnitudes, angles, gradientX, gradientY = findEdges(imgGrey)
 
     #uses canny filter to get rid of extra points
-    canny = cv2.Canny(image, 110, 225, 5, L2gradient=True)
+    #old constants 110, 225, aperturesize=5 idk why it changed
+    cv2.Canny(image, 27000, 42000, canny, 7, L2gradient=True)
+    
 
-    strongLines = componentHoughTransform(magnitudes, angles, gradientX, gradientY, canny)
-   
+    strongLines = list(itertools.chain.from_iterable(
+                    componentHoughTransform(angles, gradientX, gradientY, canny)))
+
+    #TODO: iterate through components, find intersections, and then pnp and then you are done
+    
     if (len(strongLines) > 0):
         visutils.drawHoughLines(np.array(strongLines), image, "houghLines")
 

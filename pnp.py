@@ -104,7 +104,7 @@ def solvePointPNP(pixelPoints, relativePoints):
 
 tagLength = 1
 
-#points MUST be 4, 1, 2, 3 quadrant order for opencv implementation
+#points MUST be 2, 1, 3, 4 quadrant order for opencv implementation
 objectPoints = np.array([[-tagLength/2,tagLength/2,0],
                          [tagLength/2,tagLength/2,0],
                          [tagLength/2,-tagLength/2,0],
