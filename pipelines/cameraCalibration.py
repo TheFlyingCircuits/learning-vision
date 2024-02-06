@@ -41,7 +41,7 @@ def initCamera():
 def initNetworkTables():
     networkTables = NetworkTableInstance.getDefault()
 
-    onRobot = False
+    onRobot = True
     if (onRobot):
         print("Starting CircuitVision in Robot Mode")
         networkTables.startClient4("wpilibpi")
@@ -88,6 +88,14 @@ def main():
     focalXPub = networkTable.getDoubleTopic("focalX").publish()
     focalYPub = networkTable.getDoubleTopic("focalY").publish()
     rmsErrorPub = networkTable.getDoubleTopic("rmsReprojectError").publish()
+
+    # init publishers for tag info
+    tagXPub = networkTable.getDoubleTopic("tagXmeters").publish()
+    tagYPub = networkTable.getDoubleTopic("tagYmeters").publish()
+    tagZPub = networkTable.getDoubleTopic("tagZmeters").publish()
+    freedomXPub = networkTable.getDoubleTopic("tagXinches").publish()
+    freedomYPub = networkTable.getDoubleTopic("tagYinches").publish()
+    freedomZPub = networkTable.getDoubleTopic("tagZinches").publish()
 
     # init variables for storing calibration info
     cameraMatrix = None
@@ -159,7 +167,14 @@ def main():
             focalYPub.set(cameraMatrix[1, 1])
             rmsErrorPub.set(rmsReprojectError)
         elif (not(isCaptureMode)):
-            testOpenCVImpl(frame, cameraMatrix)
+            x, y, z = testOpenCVImpl(frame, cameraMatrix)
+            tagXPub.set(x)
+            tagYPub.set(y)
+            tagZPub.set(z)
+            inchesPerMeter = 1/0.0254
+            freedomXPub.set(inchesPerMeter * x)
+            freedomYPub.set(inchesPerMeter * y)
+            freedomZPub.set(inchesPerMeter * z)
 
 
         captureCountPub.set(len(correspondingWorldPoints))
@@ -182,13 +197,19 @@ def testOpenCVImpl(image, cameraMatrix):
     corners, ids, _ = cv.aruco.detectMarkers(image, tagFamily)
     if ((ids is None) or len(ids) == 0):
         framePutter.putFrame(image)
-        return
+        return 0, 0, 0
 
     tagWidthInches = 6.5
     metersPerInch = 0.0254
     tagWidthMeters = tagWidthInches * metersPerInch
     distortionCoeffs = np.array([0, 0, 0, 0, 0], dtype=np.float32) # assume negligible lens distoriton
-    rotationVectors, translationVectors, _ = cv.aruco.estimatePoseSingleMarkers(corners, tagWidthMeters, cameraMatrix, distortionCoeffs, )
+    rotationVectors, translationVectors, _ = cv.aruco.estimatePoseSingleMarkers(corners, tagWidthMeters, cameraMatrix, distortionCoeffs)
+
+    # there's an extra nested level for some reason?
+    # but the drawing code breaks if you remove it.
+    x = translationVectors[0][0][0]
+    y = translationVectors[0][0][1]
+    z = translationVectors[0][0][2]
 
     drawOnMe = image.copy()
     drawOnMe = cv.aruco.drawDetectedMarkers(drawOnMe, corners, ids)
@@ -196,5 +217,7 @@ def testOpenCVImpl(image, cameraMatrix):
     drawOnMe = cv.drawFrameAxes(drawOnMe, cameraMatrix, distortionCoeffs, rotationVectors, translationVectors, howLongToDrawAxesMeters, thickness=2)
     # (x,y,z) -> (r,g,b)
     framePutter.putFrame(drawOnMe)
+
+    return x, y, z
 
 main()
