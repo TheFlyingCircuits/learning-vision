@@ -43,9 +43,9 @@ def main():
     global framePutter
     networkTables = NetworkTableInstance.getDefault()
     # start NetworkTables
-    onRobot = True
+    onRobot = False
     if (not(onRobot)):
-        print("Starting CircuitVision in Desktp Mode")
+        print("Starting CircuitVision in Desktop Mode")
         networkTables.startServer()
     else:
         print("Starting CircuitVision in Robot Mode")
@@ -61,12 +61,23 @@ def main():
     print("numpyVersion:", np.__version__)
     # print("CV Build:", cv.getBuildInformation())
 
-    table = networkTables.getTable("myTable")
-    subscriber = table.getDoubleTopic("myTopic").subscribe(0)
-    publisher = table.getDoubleTopic("myTopic").publish()
+
+    # networktables interface for capturing data
+    networkTable = networkTables.getTable("cameraCalibration")
+    subscriber = networkTable.getDoubleTopic("frameCapture").subscribe(0)
+    publisher = networkTable.getDoubleTopic("frameCapture").publish()
     publisher.set(50) # put the topic on the dashboard
     subscriber.readQueue() # read the value I just put so count doesn't trigger on first sight
-    captureCountPub = table.getDoubleTopic("captureCount").publish()
+    captureCountPub = networkTable.getDoubleTopic("captureCount").publish()
+
+    # publishers for calibration output
+    centerXPub = networkTable.getDoubleTopic("centerX").publish()
+    centerYPub = networkTable.getDoubleTopic("centerY").publish()
+    focalXPub = networkTable.getDoubleTopic("focalX").publish()
+    focalYPub = networkTable.getDoubleTopic("focalY").publish()
+    rmsErrorPub = networkTable.getDoubleTopic("rmsReprojectError").publish()
+    
+
 
 
 
@@ -75,60 +86,80 @@ def main():
     #
 
     # A "chessboard point" is a place where two black squares touch
-    chessboardPointsPerRow = 7
-    chessboardPointsPerCol = 5
+    chessboardPointsPerRow = 9
+    chessboardPointsPerCol = 6
+    patternCols = chessboardPointsPerRow # each row has all columns
+    patternRows = chessboardPointsPerCol # each col as all rows
+    patternShape = (patternCols, patternRows)
     distanceBetweenCornersMeters = 1 #3/100
     localChessBoardCoordinates = []
-    for r in range(chessboardPointsPerRow):
-        for c in range(chessboardPointsPerCol):
-            x = r * distanceBetweenCornersMeters
-            y = c * distanceBetweenCornersMeters
+    for r in range(patternRows):
+        for c in range(patternCols):
+            x = c * distanceBetweenCornersMeters
+            y = r * distanceBetweenCornersMeters
             z = 0
             localChessBoardCoordinates.append((x, y, z))
     localChessBoardCoordinates = np.array(localChessBoardCoordinates, dtype=np.float32)
+    # print("mine:", localChessBoardCoordinates)
+    # objp = np.zeros((9*14,3), np.float32)
+    # objp[:,:2] = np.mgrid[0:9,0:14].T.reshape(-1,2)
+    # print("theirs:", objp)
 
-    # init arrays to keep track of point correspondences
-    imageCordsOfCorners = []
-    correspondingWorldPoints = []
-
-    captureCount = 0
     while(True):
-        # get the next frame from the camera, and convert to greyscale
-        _, frame = camera.read()
-        greyscale = frame[:,:,0]
+        # init arrays to keep track of point correspondeneces
+        imageCordsOfCorners = []
+        correspondingWorldPoints = []
+        captureCount = 0
+        publisher.set(50)
+        subscriber.readQueue()
 
-        # look for chessboard in the frame
-        patternFound, corners = cv.findChessboardCorners(greyscale, patternSize=(chessboardPointsPerRow, chessboardPointsPerCol))
+        while (True):
 
-        if (patternFound):
-            # just copying docs
-            criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            refinedCorners = cv.cornerSubPix(greyscale, corners, (11,11), (-1,-1), criteria)
+            # get the next frame from the camera, and convert to greyscale
+            _, frame = camera.read()
+            greyscale = frame[:,:,0]
 
-            canvas = np.copy(frame)
-            cv.drawChessboardCorners(canvas, (chessboardPointsPerRow, chessboardPointsPerCol), refinedCorners, patternWasFound=True)
-            framePutter.putFrame(cv.flip(canvas, 1))
-        else:
-            canvas = np.copy(frame)
-            cv.drawChessboardCorners(canvas, (chessboardPointsPerRow, chessboardPointsPerCol), corners, patternWasFound=False)
-            framePutter.putFrame(cv.flip(canvas, 1))
+            # look for chessboard in the frame
+            patternFound, corners = cv.findChessboardCorners(greyscale, patternSize=patternShape)
 
-        # detect a change on the dashboard.
-        if (len(subscriber.readQueue()) > 0 and patternFound):
-            imageCordsOfCorners.append(refinedCorners)
-            correspondingWorldPoints.append(localChessBoardCoordinates)
-            captureCount += 1
+            if (patternFound):
+                # just copying docs
+                criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                refinedCorners = cv.cornerSubPix(greyscale, corners, (11,11), (-1,-1), criteria)
 
-        captureCountPub.set(captureCount)
-        if (subscriber.get() < 0):
-            print("Done with captures!")
-            print("working on camera matrix now (may take a minute...)")
-            break
-        # testOpenCVImpl(frame)
+                canvas = np.copy(frame)
+                cv.drawChessboardCorners(canvas, patternShape, refinedCorners, patternWasFound=True)
+                framePutter.putFrame(canvas)
+            else:
+                canvas = np.copy(frame)
+                cv.drawChessboardCorners(canvas, patternShape, corners, patternWasFound=False)
+                framePutter.putFrame(canvas)
+
+            # detect a change on the dashboard.
+            if (len(subscriber.readQueue()) > 0 and patternFound and subscriber.get() > 0):
+                imageCordsOfCorners.append(refinedCorners)
+                correspondingWorldPoints.append(localChessBoardCoordinates)
+                captureCount += 1
+
+            captureCountPub.set(captureCount)
+            if (subscriber.get() < 0):
+                framePutter.putFrame(np.full_like(frame, 255))
+                print("Done with captures!")
+                print("working on camera matrix now (may take a minute...)")
+                break
+            # testOpenCVImpl(frame)
     
-    rmsReprojectError, cameraMatrix, distCoeffs, rotationVecs, translationVecs = cv.calibrateCamera(correspondingWorldPoints, imageCordsOfCorners, greyscale.shape[::-1], None, None)
-    print("camera matrix (units are pixels):", cameraMatrix)
-    print("rmsReprojectError:", rmsReprojectError)
+        rmsReprojectError, cameraMatrix, distCoeffs, rotationVecs, translationVecs = cv.calibrateCamera(correspondingWorldPoints, imageCordsOfCorners, greyscale.shape[::-1], None, None)
+        # print("camera matrix (units are pixels):", cameraMatrix)
+        # print("rmsReprojectError:", rmsReprojectError)
+
+        centerXPub.set(cameraMatrix[0, 2])
+        centerYPub.set(cameraMatrix[1, 2])
+        focalXPub.set(cameraMatrix[0, 0])
+        focalYPub.set(cameraMatrix[1, 1])
+        rmsErrorPub.set(rmsReprojectError)
+        # finish inner loop, then start new calibration in outer loop
+
 
 
 
