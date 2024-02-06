@@ -5,12 +5,8 @@ import cv2 as cv
 # wpiLib
 from cscore import CameraServer
 from ntcore import NetworkTableInstance
-# import wpilib
 
-framePutter = None
-
-
-def main():
+def initCamera():
     # start the camera
     camera = cv.VideoCapture(0, cv.CAP_V4L2)
 
@@ -40,50 +36,64 @@ def main():
     fourccBytes = fourccInt.to_bytes(length=4, byteorder='little')
     fourccString = fourccBytes.decode()
 
-    global framePutter
+    return camera, frameWidth, frameHeight, targetFPS
+
+def initNetworkTables():
     networkTables = NetworkTableInstance.getDefault()
-    # start NetworkTables
+
     onRobot = False
-    if (not(onRobot)):
-        print("Starting CircuitVision in Desktop Mode")
-        networkTables.startServer()
-    else:
+    if (onRobot):
         print("Starting CircuitVision in Robot Mode")
         networkTables.startClient4("wpilibpi")
         networkTables.setServerTeam(1787)
-        #networkTables.startDSClient()
+        # networkTables.startDSCLient()
+    else:
+        print("Starting CircuitVision in Desktop Mode")
+        networkTables.startServer()
+    
+    return networkTables
+
+
+framePutter = None
+
+def main():
+    networkTables = initNetworkTables()
+    camera, frameWidth, frameHeight, targetFPS = initCamera()
+
+    # setup button to switch between calibration mode and AR mode
+    networkTable = networkTables.getTable("cameraCalibration")
+    modeButtonPub = networkTable.getBooleanTopic("captureMode").publish()
+    modeButtonSub = networkTable.getBooleanTopic("captureMode").subscribe(True)
+    modeButtonPub.set(True) # True = is calibrating, False = visualizing (not calibrating)
+
+    # setup button to capture calibration data
+    captureButtonPub = networkTable.getBooleanTopic("capture").publish()
+    captureButtonSub = networkTable.getBooleanTopic("capture").subscribe(False)
+    captureButtonPub.set(False)
+
+    # init camera stream for viz
+    global framePutter
     framePutter = CameraServer.putVideo("My Stream", frameWidth, frameHeight)
     framePutter.putFrame(np.full((frameHeight, frameWidth), 255, dtype=np.uint8))
-
 
     print("Using "+str(frameWidth)+"x"+str(frameHeight)+" frames @ "+str(targetFPS)+" FPS")
     print("openCV Verison:", cv.__version__)
     print("numpyVersion:", np.__version__)
     # print("CV Build:", cv.getBuildInformation())
 
-
-    # networktables interface for capturing data
-    networkTable = networkTables.getTable("cameraCalibration")
-    subscriber = networkTable.getDoubleTopic("frameCapture").subscribe(0)
-    publisher = networkTable.getDoubleTopic("frameCapture").publish()
-    publisher.set(50) # put the topic on the dashboard
-    subscriber.readQueue() # read the value I just put so count doesn't trigger on first sight
+    # init publishers for calibration info:
     captureCountPub = networkTable.getDoubleTopic("captureCount").publish()
-
-    # publishers for calibration output
     centerXPub = networkTable.getDoubleTopic("centerX").publish()
     centerYPub = networkTable.getDoubleTopic("centerY").publish()
     focalXPub = networkTable.getDoubleTopic("focalX").publish()
     focalYPub = networkTable.getDoubleTopic("focalY").publish()
     rmsErrorPub = networkTable.getDoubleTopic("rmsReprojectError").publish()
-    
 
-
-
-
-    #
-    # START CALIBRATION
-    #
+    # init variables for storing calibration info
+    cameraMatrix = None
+    distortionFactors = None
+    imageCordsOfCorners = []
+    correspondingWorldPoints = []
 
     # A "chessboard point" is a place where two black squares touch
     chessboardPointsPerRow = 9
@@ -100,25 +110,25 @@ def main():
             z = 0
             localChessBoardCoordinates.append((x, y, z))
     localChessBoardCoordinates = np.array(localChessBoardCoordinates, dtype=np.float32)
-    # print("mine:", localChessBoardCoordinates)
-    # objp = np.zeros((9*14,3), np.float32)
-    # objp[:,:2] = np.mgrid[0:9,0:14].T.reshape(-1,2)
-    # print("theirs:", objp)
+    
+    # start grabbing frames
+    while (True):
+        # get the next frame from the camera, and convert to greyscale
+        _, frame = camera.read()
+        greyscale = frame[:,:,0]
 
-    while(True):
-        # init arrays to keep track of point correspondeneces
-        imageCordsOfCorners = []
-        correspondingWorldPoints = []
-        captureCount = 0
-        publisher.set(50)
-        subscriber.readQueue()
+        # read dashboard buttons
+        modeButtonChanged = len(modeButtonSub.readQueue()) > 0
+        isCaptureMode = modeButtonSub.get()
+        captureButtonClicked = (captureButtonSub.get() == True)
+        if (captureButtonClicked):
+            # auto toggle off after click
+            captureButtonPub.set(False)
 
-        while (True):
-
-            # get the next frame from the camera, and convert to greyscale
-            _, frame = camera.read()
-            greyscale = frame[:,:,0]
-
+        if (modeButtonChanged and isCaptureMode):
+            imageCordsOfCorners = []
+            correspondingWorldPoints = []
+        elif (isCaptureMode): # in the middle of calibration mode
             # look for chessboard in the frame
             patternFound, corners = cv.findChessboardCorners(greyscale, patternSize=patternShape)
 
@@ -135,42 +145,56 @@ def main():
                 cv.drawChessboardCorners(canvas, patternShape, corners, patternWasFound=False)
                 framePutter.putFrame(canvas)
 
-            # detect a change on the dashboard.
-            if (len(subscriber.readQueue()) > 0 and patternFound and subscriber.get() > 0):
+            # detect a click of the capture button on the dashboard.
+            if (captureButtonClicked and patternFound):
                 imageCordsOfCorners.append(refinedCorners)
                 correspondingWorldPoints.append(localChessBoardCoordinates)
-                captureCount += 1
+        elif (modeButtonChanged and not(isCaptureMode)):
+            # transition into AR mode. Update camera calibration info
+            rmsReprojectError, cameraMatrix, distortionFactors, rotationVecs, translationVecs = cv.calibrateCamera(correspondingWorldPoints, imageCordsOfCorners, greyscale.shape[::-1], None, None)
 
-            captureCountPub.set(captureCount)
-            if (subscriber.get() < 0):
-                framePutter.putFrame(np.full_like(frame, 255))
-                print("Done with captures!")
-                print("working on camera matrix now (may take a minute...)")
-                break
-            # testOpenCVImpl(frame)
-    
-        rmsReprojectError, cameraMatrix, distCoeffs, rotationVecs, translationVecs = cv.calibrateCamera(correspondingWorldPoints, imageCordsOfCorners, greyscale.shape[::-1], None, None)
-        # print("camera matrix (units are pixels):", cameraMatrix)
-        # print("rmsReprojectError:", rmsReprojectError)
+            centerXPub.set(cameraMatrix[0, 2])
+            centerYPub.set(cameraMatrix[1, 2])
+            focalXPub.set(cameraMatrix[0, 0])
+            focalYPub.set(cameraMatrix[1, 1])
+            rmsErrorPub.set(rmsReprojectError)
+        elif (not(isCaptureMode)):
+            testOpenCVImpl(frame, cameraMatrix)
 
-        centerXPub.set(cameraMatrix[0, 2])
-        centerYPub.set(cameraMatrix[1, 2])
-        focalXPub.set(cameraMatrix[0, 0])
-        focalYPub.set(cameraMatrix[1, 1])
-        rmsErrorPub.set(rmsReprojectError)
-        # finish inner loop, then start new calibration in outer loop
+
+        captureCountPub.set(len(correspondingWorldPoints))
+        # captureButtonPub.set(False)
 
 
 
 
-def testOpenCVImpl(image):
+
+def testOpenCVImpl(image, cameraMatrix):
+    # https://docs.opencv.org/4.6.0/d5/dae/tutorial_aruco_detection.html
     tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_36h11)
+    # tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_16h5)
     # detectorParameters = 
     # detector = cv.aruco.ArucoDetector(dictionary=tagFamily)
+
+    # corners is a list of lists
+    # within each sub list, there are 4 corners, ordered clockwise
+    # starting corner is unknown?
     corners, ids, _ = cv.aruco.detectMarkers(image, tagFamily)
+    if ((ids is None) or len(ids) == 0):
+        framePutter.putFrame(image)
+        return
+
+    tagWidthInches = 6.5
+    metersPerInch = 0.0254
+    tagWidthMeters = tagWidthInches * metersPerInch
+    distortionCoeffs = np.array([0, 0, 0, 0, 0], dtype=np.float32) # assume negligible lens distoriton
+    rotationVectors, translationVectors, _ = cv.aruco.estimatePoseSingleMarkers(corners, tagWidthMeters, cameraMatrix, distortionCoeffs, )
 
     drawOnMe = image.copy()
     drawOnMe = cv.aruco.drawDetectedMarkers(drawOnMe, corners, ids)
+    howLongToDrawAxesMeters = tagWidthMeters
+    drawOnMe = cv.drawFrameAxes(drawOnMe, cameraMatrix, distortionCoeffs, rotationVectors, translationVectors, howLongToDrawAxesMeters, thickness=2)
+    # (x,y,z) -> (r,g,b)
     framePutter.putFrame(drawOnMe)
 
 main()
