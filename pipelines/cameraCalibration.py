@@ -41,7 +41,7 @@ def initCamera():
 def initNetworkTables():
     networkTables = NetworkTableInstance.getDefault()
 
-    onRobot = True
+    onRobot = False
     if (onRobot):
         print("Starting CircuitVision in Robot Mode")
         networkTables.startClient4("wpilibpi")
@@ -168,13 +168,16 @@ def main():
             rmsErrorPub.set(rmsReprojectError)
         elif (not(isCaptureMode)):
             x, y, z = testOpenCVImpl(frame, cameraMatrix)
-            tagXPub.set(x)
-            tagYPub.set(y)
-            tagZPub.set(z)
+
+            # only show out to millimeters/thousandths of an inch.
+            # anything more than that is probably overkill / just noise.
+            tagXPub.set(round(x, 3))
+            tagYPub.set(round(y, 3))
+            tagZPub.set(round(z, 3))
             inchesPerMeter = 1/0.0254
-            freedomXPub.set(inchesPerMeter * x)
-            freedomYPub.set(inchesPerMeter * y)
-            freedomZPub.set(inchesPerMeter * z)
+            freedomXPub.set(round(inchesPerMeter * x, 3))
+            freedomYPub.set(round(inchesPerMeter * y, 3))
+            freedomZPub.set(round(inchesPerMeter * z, 3))
 
 
         captureCountPub.set(len(correspondingWorldPoints))
@@ -186,38 +189,76 @@ def main():
 
 def testOpenCVImpl(image, cameraMatrix):
     # https://docs.opencv.org/4.6.0/d5/dae/tutorial_aruco_detection.html
-    tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_36h11)
-    # tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_16h5)
-    # detectorParameters = 
-    # detector = cv.aruco.ArucoDetector(dictionary=tagFamily)
-
-    # corners is a list of lists
-    # within each sub list, there are 4 corners, ordered clockwise
-    # starting corner is unknown?
-    corners, ids, _ = cv.aruco.detectMarkers(image, tagFamily)
-    if ((ids is None) or len(ids) == 0):
-        framePutter.putFrame(image)
-        return 0, 0, 0
-
-    tagWidthInches = 6.5
+    # tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_36h11)
+    tagFamily = cv.aruco.getPredefinedDictionary(cv.aruco.DICT_APRILTAG_16h5)
+    tagWidthInches = 6 # 6.5 for 36h11, 6 for 16h5
     metersPerInch = 0.0254
     tagWidthMeters = tagWidthInches * metersPerInch
-    distortionCoeffs = np.array([0, 0, 0, 0, 0], dtype=np.float32) # assume negligible lens distoriton
-    rotationVectors, translationVectors, _ = cv.aruco.estimatePoseSingleMarkers(corners, tagWidthMeters, cameraMatrix, distortionCoeffs)
 
-    # there's an extra nested level for some reason?
-    # but the drawing code breaks if you remove it.
-    x = translationVectors[0][0][0]
-    y = translationVectors[0][0][1]
-    z = translationVectors[0][0][2]
+    # don't use the default of no corner refinement! we want precision!
+    # https://docs.opencv.org/4.6.0/d1/dcd/structcv_1_1aruco_1_1DetectorParameters.html
+    detectorParameters = cv.aruco.DetectorParameters.create()
+    detectorParameters.cornerRefinementMethod = cv.aruco.CORNER_REFINE_APRILTAG
+
+    # corners is a list of 4x2 numpy arrays
+    # within each numpy array, there are 4 corners (xCord(column) followed by yCord(row)), ordered clockwise
+    # [topLeft, topRight, bottomRight, bottomLeft] (source is 1st link, not mentioned in function docs (ugh))
+    # experiment differs from documentation.
+    # experiment says corner order is [bottomRight, bottomLeft, topLeft, topRight]
+    stupidCorners, stupidIds, cornersOfRejectedCandidates = cv.aruco.detectMarkers(image, tagFamily, parameters=detectorParameters)
+    if ((stupidIds is None) or len(stupidIds) == 0):
+        framePutter.putFrame(image)
+        return 0, 0, 0
+    
+    # unpack data in a format that actually makes sense
+    # for some reason, they keep the actual values we want
+    # within a list of size 1, so we pull them out here
+    # so we don't have an annoying redundant index.
+    corners = []
+    ids = []
+    for i in range(len(stupidIds)):
+        actualId = stupidIds[i][0]
+        actualCorners = stupidCorners[i][0]
+        ids.append(actualId)
+        corners.append(actualCorners)
+    
+    rotationVectors = [] # direction = rotation axis, magnitude = how many radians to rotate about that axis
+    translationVectors = [] # units of meters
+    localX = tagWidthMeters / 2
+    localY = tagWidthMeters / 2
+    localTagCords = np.array([(-localX, localY, 0), (localX, localY, 0), (localX, -localY, 0), (-localX, -localY, 0)], dtype=np.float32) # match order convention from above
+
+    for setOfFourCorners in corners:
+        distortionCoeffs = np.array([0, 0, 0, 0, 0], dtype=np.float32) # assume negligible lens distoriton
+        undocumentedReturnVal, stupidRotationVector, stupidTranslationVector = cv.solvePnP(localTagCords, setOfFourCorners, cameraMatrix, distortionCoeffs, flags=cv.SOLVEPNP_IPPE_SQUARE)
+
+        # don't want a list of single element lists, we just want the cords
+        # why do they do it like that????
+        rotationVector = np.array([stupidRotationVector[0][0], stupidRotationVector[1][0], stupidRotationVector[2][0]])
+        translationVector = np.array([stupidTranslationVector[0][0], stupidTranslationVector[1][0], stupidTranslationVector[2][0]])
+
+        rotationVectors.append(rotationVector)
+        translationVectors.append(translationVector)
+
+
+    # tagWidthInches = 6.5
+    # metersPerInch = 0.0254
+    # tagWidthMeters = tagWidthInches * metersPerInch
+    # distortionCoeffs = np.array([0, 0, 0, 0, 0], dtype=np.float32) # assume negligible lens distoriton
+    # rotationVectors, translationVectors, _ = cv.aruco.estimatePoseSingleMarkers(corners, tagWidthMeters, cameraMatrix, distortionCoeffs)
+
 
     drawOnMe = image.copy()
-    drawOnMe = cv.aruco.drawDetectedMarkers(drawOnMe, corners, ids)
+    drawOnMe = cv.aruco.drawDetectedMarkers(drawOnMe, stupidCorners, stupidIds)
     howLongToDrawAxesMeters = tagWidthMeters
-    drawOnMe = cv.drawFrameAxes(drawOnMe, cameraMatrix, distortionCoeffs, rotationVectors, translationVectors, howLongToDrawAxesMeters, thickness=2)
-    # (x,y,z) -> (r,g,b)
+    for i in range(len(ids)):
+        rotationVector = rotationVectors[i]
+        translationVector = translationVectors[i]
+        drawOnMe = cv.drawFrameAxes(drawOnMe, cameraMatrix, distortionCoeffs, rotationVector, translationVector, howLongToDrawAxesMeters, thickness=3)
+        # (x,y,z) -> (r,g,b)
     framePutter.putFrame(drawOnMe)
 
-    return x, y, z
+
+    return translationVectors[0]
 
 main()
